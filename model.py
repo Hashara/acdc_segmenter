@@ -5,7 +5,7 @@
 import tensorflow as tf
 from tfwrapper import losses
 
-import tensorflow.examples.tutorials.mnist
+# import tensorflow.examples.tutorials.mnist
 
 
 def inference(images, exp_config, training):
@@ -29,11 +29,11 @@ def loss(logits, labels, nlabels, loss_type, weight_decay=0.0):
 
     labels = tf.one_hot(labels, depth=nlabels)
 
-    with tf.variable_scope('weights_norm'):
+    with tf.compat.v1.variable_scope('weights_norm'):
 
         weights_norm = tf.reduce_sum(
             input_tensor = weight_decay*tf.stack(
-                [tf.nn.l2_loss(ii) for ii in tf.get_collection('weight_variables')]
+                [tf.nn.l2_loss(ii) for ii in tf.compat.v1.get_collection('weight_variables')]
             ),
             name='weights_norm'
         )
@@ -91,7 +91,7 @@ def training_step(loss, optimizer_handle, learning_rate, **kwargs):
         optimizer = optimizer_handle(learning_rate=learning_rate)
 
     # The with statement is needed to make sure the tf contrib version of batch norm properly performs its updates
-    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+    update_ops = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.UPDATE_OPS)
     with tf.control_dependencies(update_ops):
         train_op = optimizer.minimize(loss)
 

@@ -9,6 +9,7 @@ import shutil
 import tensorflow as tf
 import numpy as np
 
+import model_zoo
 import utils
 import image_utils
 import model as model
@@ -27,6 +28,9 @@ from experiments import unet2D_bn_modified_wxent as exp_config
 # from experiments import unet2D_bn_wxent as exp_config
 # from experiments import unet3D_bn_modified_wxent as exp_config
 # from experiments import unet2D_bn_wxentropy_bs5 as exp_config
+import tfwrapper.losses as losses
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.metrics import Recall, Precision
 
 ########################################################################################
 
@@ -35,7 +39,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 log_dir = os.path.join(sys_config.log_root, exp_config.experiment_name)
 
 # Set SGE_GPU environment variable if we are not on the local host
-sys_config.setup_GPU_environment()
+# sys_config.setup_GPU_environment()
 
 try:
     import cv2
@@ -105,250 +109,293 @@ def run_training(continue_run):
     logging.info(labels_train.shape)
     logging.info(labels_train.dtype)
 
+    ###
+    image_tensor_shape = [exp_config.batch_size] + list(exp_config.image_size) + [1]
+    mask_tensor_shape = [exp_config.batch_size] + list(exp_config.image_size)
+
+    print(image_tensor_shape)
+    print(mask_tensor_shape)
+
+    # images_pl = tf.compat.v1.placeholder(tf.float32, shape=image_tensor_shape, name='images')
+    # images_pl = tf.compat.v1.placeholder(tf.uint8, shape=mask_tensor_shape, name='labels')
+
+    # images_pl = np.random.rand(*image_tensor_shape).astype(np.float32)
+    # masks_pl = np.random.rand(*mask_tensor_shape).astype(np.float32)
+    images_train = images_train[..., np.newaxis]
+    labels_train = labels_train[..., np.newaxis]
+
+    batch_size = exp_config.batch_size
+
+    images_dataset = tf.data.Dataset.from_tensor_slices(images_train)
+    labels_dataset = tf.data.Dataset.from_tensor_slices(labels_train)
+    dataset = tf.data.Dataset.zip((images_dataset, labels_dataset))
+
+    dataset = dataset.shuffle(buffer_size=len(images_train))
+    dataset = dataset.map(acdc_data.preprocess_data)
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+
+    input_shape = images_train[0].shape
+    model = model_zoo.unet_model(input_shape)
+    model.compile(optimizer=Adam(lr=1e-4), loss='binary_crossentropy', metrics=['accuracy'])
+
+    # Train the model using the Dataset
+    epochs = 50
+    model.fit(dataset, epochs=epochs, validation_split=0.2)
+
+    model.save('unet_model.h5')
+
+        #
+        # if train_on_all_data:
+        #     max_to_keep = None
+        # else:
+        #     max_to_keep = 5
+
+
     # Tell TensorFlow that the model will be built into the default Graph.
 
-    with tf.Graph().as_default():
-
-        # Generate placeholders for the images and labels.
-
-        image_tensor_shape = [exp_config.batch_size] + list(exp_config.image_size) + [1]
-        mask_tensor_shape = [exp_config.batch_size] + list(exp_config.image_size)
-
-        images_pl = tf.placeholder(tf.float32, shape=image_tensor_shape, name='images')
-        labels_pl = tf.placeholder(tf.uint8, shape=mask_tensor_shape, name='labels')
-
-        learning_rate_pl = tf.placeholder(tf.float32, shape=[])
-        training_pl = tf.placeholder(tf.bool, shape=[])
-
-        tf.summary.scalar('learning_rate', learning_rate_pl)
-
-        # Build a Graph that computes predictions from the inference model.
-        logits = model.inference(images_pl, exp_config, training=training_pl)
-
-        # Add to the Graph the Ops for loss calculation.
-        [loss, _, weights_norm] = model.loss(logits,
-                                             labels_pl,
-                                             nlabels=exp_config.nlabels,
-                                             loss_type=exp_config.loss_type,
-                                             weight_decay=exp_config.weight_decay)  # second output is unregularised loss
-
-        tf.summary.scalar('loss', loss)
-        tf.summary.scalar('weights_norm_term', weights_norm)
-
-        # Add to the Graph the Ops that calculate and apply gradients.
-        if exp_config.momentum is not None:
-            train_op = model.training_step(loss, exp_config.optimizer_handle, learning_rate_pl, momentum=exp_config.momentum)
-        else:
-            train_op = model.training_step(loss, exp_config.optimizer_handle, learning_rate_pl)
-
-        # Add the Op to compare the logits to the labels during evaluation.
-        eval_loss = model.evaluation(logits,
-                                     labels_pl,
-                                     images_pl,
-                                     nlabels=exp_config.nlabels,
-                                     loss_type=exp_config.loss_type)
-
-        # Build the summary Tensor based on the TF collection of Summaries.
-        summary = tf.summary.merge_all()
-
-        # Add the variable initializer Op.
-        init = tf.global_variables_initializer()
-
-        # Create a saver for writing training checkpoints.
-
-        if train_on_all_data:
-            max_to_keep = None
-        else:
-            max_to_keep = 5
-
-        saver = tf.train.Saver(max_to_keep=max_to_keep)
-        saver_best_dice = tf.train.Saver()
-        saver_best_xent = tf.train.Saver()
-
-        # Create a session for running Ops on the Graph.
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True  # Do not assign whole gpu memory, just use it on the go
-        config.allow_soft_placement = True  # If a operation is not define it the default device, let it execute in another.
-        sess = tf.Session(config=config)
-
-        # Instantiate a SummaryWriter to output summaries and the Graph.
-        summary_writer = tf.summary.FileWriter(log_dir, sess.graph)
-
-        # with tf.name_scope('monitoring'):
-
-        val_error_ = tf.placeholder(tf.float32, shape=[], name='val_error')
-        val_error_summary = tf.summary.scalar('validation_loss', val_error_)
-
-        val_dice_ = tf.placeholder(tf.float32, shape=[], name='val_dice')
-        val_dice_summary = tf.summary.scalar('validation_dice', val_dice_)
-
-        val_summary = tf.summary.merge([val_error_summary, val_dice_summary])
-
-        train_error_ = tf.placeholder(tf.float32, shape=[], name='train_error')
-        train_error_summary = tf.summary.scalar('training_loss', train_error_)
-
-        train_dice_ = tf.placeholder(tf.float32, shape=[], name='train_dice')
-        train_dice_summary = tf.summary.scalar('training_dice', train_dice_)
-
-        train_summary = tf.summary.merge([train_error_summary, train_dice_summary])
-
-        # Run the Op to initialize the variables.
-        sess.run(init)
-
-        if continue_run:
-            # Restore session
-            saver.restore(sess, init_checkpoint_path)
-
-        step = init_step
-        curr_lr = exp_config.learning_rate
-
-        no_improvement_counter = 0
-        best_val = np.inf
-        last_train = np.inf
-        loss_history = []
-        loss_gradient = np.inf
-        best_dice = 0
-
-        for epoch in range(exp_config.max_epochs):
-
-            logging.info('EPOCH %d' % epoch)
-
-
-            for batch in iterate_minibatches(images_train,
-                                             labels_train,
-                                             batch_size=exp_config.batch_size,
-                                             augment_batch=exp_config.augment_batch):
-
-            # You can run this loop with the BACKGROUND GENERATOR, which will lead to some improvements in the
-            # training speed. However, be aware that currently an exception inside this loop may not be caught.
-            # The batch generator may just continue running silently without warning eventhough the code has
-            # crashed.
-            # for batch in BackgroundGenerator(iterate_minibatches(images_train,
-            #                                                      labels_train,
-            #                                                      batch_size=exp_config.batch_size,
-            #                                                      augment_batch=exp_config.augment_batch)):
-
-
-                if exp_config.warmup_training:
-                    if step < 50:
-                        curr_lr = exp_config.learning_rate / 10.0
-                    elif step == 50:
-                        curr_lr = exp_config.learning_rate
-
-                start_time = time.time()
-
-                # batch = bgn_train.retrieve()
-                x, y = batch
-
-                # TEMPORARY HACK (to avoid incomplete batches
-                if y.shape[0] < exp_config.batch_size:
-                    step += 1
-                    continue
-
-                feed_dict = {
-                    images_pl: x,
-                    labels_pl: y,
-                    learning_rate_pl: curr_lr,
-                    training_pl: True
-                }
-
-
-                _, loss_value = sess.run([train_op, loss], feed_dict=feed_dict)
-
-                duration = time.time() - start_time
-
-                # Write the summaries and print an overview fairly often.
-                if step % 10 == 0:
-                    # Print status to stdout.
-                    logging.info('Step %d: loss = %.2f (%.3f sec)' % (step, loss_value, duration))
-                    # Update the events file.
-
-                    summary_str = sess.run(summary, feed_dict=feed_dict)
-                    summary_writer.add_summary(summary_str, step)
-                    summary_writer.flush()
-
-                if (step + 1) % exp_config.train_eval_frequency == 0:
-
-                    logging.info('Training Data Eval:')
-                    [train_loss, train_dice] = do_eval(sess,
-                                                       eval_loss,
-                                                       images_pl,
-                                                       labels_pl,
-                                                       training_pl,
-                                                       images_train,
-                                                       labels_train,
-                                                       exp_config.batch_size)
-
-                    train_summary_msg = sess.run(train_summary, feed_dict={train_error_: train_loss,
-                                                                           train_dice_: train_dice}
-                                                 )
-                    summary_writer.add_summary(train_summary_msg, step)
-
-                    loss_history.append(train_loss)
-                    if len(loss_history) > 5:
-                        loss_history.pop(0)
-                        loss_gradient = (loss_history[-5] - loss_history[-1]) / 2
-
-                    logging.info('loss gradient is currently %f' % loss_gradient)
-
-                    if exp_config.schedule_lr and loss_gradient < exp_config.schedule_gradient_threshold:
-                        logging.warning('Reducing learning rate!')
-                        curr_lr /= 10.0
-                        logging.info('Learning rate changed to: %f' % curr_lr)
-
-                        # reset loss history to give the optimisation some time to start decreasing again
-                        loss_gradient = np.inf
-                        loss_history = []
-
-                    if train_loss <= last_train:  # best_train:
-                        no_improvement_counter = 0
-                        logging.info('Decrease in training error!')
-                    else:
-                        no_improvement_counter = no_improvement_counter+1
-                        logging.info('No improvment in training error for %d steps' % no_improvement_counter)
-
-                    last_train = train_loss
-
-                # Save a checkpoint and evaluate the model periodically.
-                if (step + 1) % exp_config.val_eval_frequency == 0:
-
-                    checkpoint_file = os.path.join(log_dir, 'model.ckpt')
-                    saver.save(sess, checkpoint_file, global_step=step)
-                    # Evaluate against the training set.
-
-                    if not train_on_all_data:
-
-                        # Evaluate against the validation set.
-                        logging.info('Validation Data Eval:')
-                        [val_loss, val_dice] = do_eval(sess,
-                                                       eval_loss,
-                                                       images_pl,
-                                                       labels_pl,
-                                                       training_pl,
-                                                       images_val,
-                                                       labels_val,
-                                                       exp_config.batch_size)
-
-                        val_summary_msg = sess.run(val_summary, feed_dict={val_error_: val_loss, val_dice_: val_dice}
-                        )
-                        summary_writer.add_summary(val_summary_msg, step)
-
-                        if val_dice > best_dice:
-                            best_dice = val_dice
-                            best_file = os.path.join(log_dir, 'model_best_dice.ckpt')
-                            saver_best_dice.save(sess, best_file, global_step=step)
-                            logging.info('Found new best dice on validation set! - %f -  Saving model_best_dice.ckpt' % val_dice)
-
-                        if val_loss < best_val:
-                            best_val = val_loss
-                            best_file = os.path.join(log_dir, 'model_best_xent.ckpt')
-                            saver_best_xent.save(sess, best_file, global_step=step)
-                            logging.info('Found new best crossentropy on validation set! - %f -  Saving model_best_xent.ckpt' % val_loss)
-
-
-                step += 1
-
-        sess.close()
+    # with tf.Graph().as_default():
+    #
+    #     # Generate placeholders for the images and labels.
+    #
+    #     image_tensor_shape = [exp_config.batch_size] + list(exp_config.image_size) + [1]
+    #     mask_tensor_shape = [exp_config.batch_size] + list(exp_config.image_size)
+    #
+    #     images_pl = tf.compat.v1.placeholder(tf.float32, shape=image_tensor_shape, name='images')
+    #     labels_pl = tf.compat.v1.placeholder(tf.uint8, shape=mask_tensor_shape, name='labels')
+    #
+    #     learning_rate_pl = tf.compat.v1.placeholder(tf.float32, shape=[])
+    #     training_pl = tf.compat.v1.placeholder(tf.bool, shape=[])
+    #
+    #     tf.summary.scalar('learning_rate', learning_rate_pl)
+    #
+    #     # Build a Graph that computes predictions from the inference model.
+    #     logits = model.inference(images_pl, exp_config, training=training_pl)
+    #
+    #     # Add to the Graph the Ops for loss calculation.
+    #     [loss, _, weights_norm] = model.loss(logits,
+    #                                          labels_pl,
+    #                                          nlabels=exp_config.nlabels,
+    #                                          loss_type=exp_config.loss_type,
+    #                                          weight_decay=exp_config.weight_decay)  # second output is unregularised loss
+    #
+    #     tf.summary.scalar('loss', loss)
+    #     tf.summary.scalar('weights_norm_term', weights_norm)
+    #
+    #     # Add to the Graph the Ops that calculate and apply gradients.
+    #     if exp_config.momentum is not None:
+    #         train_op = model.training_step(loss, exp_config.optimizer_handle, learning_rate_pl, momentum=exp_config.momentum)
+    #     else:
+    #         train_op = model.training_step(loss, exp_config.optimizer_handle, learning_rate_pl)
+    #
+    #     # Add the Op to compare the logits to the labels during evaluation.
+    #     eval_loss = model.evaluation(logits,
+    #                                  labels_pl,
+    #                                  images_pl,
+    #                                  nlabels=exp_config.nlabels,
+    #                                  loss_type=exp_config.loss_type)
+    #
+    #     # Build the summary Tensor based on the TF collection of Summaries.
+    #     summary = tf.summary.merge_all()
+    #
+    #     # Add the variable initializer Op.
+    #     init = tf.global_variables_initializer()
+    #
+    #     # Create a saver for writing training checkpoints.
+    #
+    #     if train_on_all_data:
+    #         max_to_keep = None
+    #     else:
+    #         max_to_keep = 5
+    #
+    #     saver = tf.train.Saver(max_to_keep=max_to_keep)
+    #     saver_best_dice = tf.train.Saver()
+    #     saver_best_xent = tf.train.Saver()
+    #
+    #     # Create a session for running Ops on the Graph.
+    #     config = tf.ConfigProto()
+    #     config.gpu_options.allow_growth = True  # Do not assign whole gpu memory, just use it on the go
+    #     config.allow_soft_placement = True  # If a operation is not define it the default device, let it execute in another.
+    #     sess = tf.Session(config=config)
+    #
+    #     # Instantiate a SummaryWriter to output summaries and the Graph.
+    #     summary_writer = tf.summary.FileWriter(log_dir, sess.graph)
+    #
+    #     # with tf.name_scope('monitoring'):
+    #
+    #     val_error_ = tf.compat.v1.placeholder(tf.float32, shape=[], name='val_error')
+    #     val_error_summary = tf.summary.scalar('validation_loss', val_error_)
+    #
+    #     val_dice_ = tf.compat.v1.placeholder(tf.float32, shape=[], name='val_dice')
+    #     val_dice_summary = tf.summary.scalar('validation_dice', val_dice_)
+    #
+    #     val_summary = tf.summary.merge([val_error_summary, val_dice_summary])
+    #
+    #     train_error_ = tf.placeholder(tf.float32, shape=[], name='train_error')
+    #     train_error_summary = tf.summary.scalar('training_loss', train_error_)
+    #
+    #     train_dice_ = tf.placeholder(tf.float32, shape=[], name='train_dice')
+    #     train_dice_summary = tf.summary.scalar('training_dice', train_dice_)
+    #
+    #     train_summary = tf.summary.merge([train_error_summary, train_dice_summary])
+    #
+    #     # Run the Op to initialize the variables.
+    #     sess.run(init)
+    #
+    #     if continue_run:
+    #         # Restore session
+    #         saver.restore(sess, init_checkpoint_path)
+    #
+    #     step = init_step
+    #     curr_lr = exp_config.learning_rate
+    #
+    #     no_improvement_counter = 0
+    #     best_val = np.inf
+    #     last_train = np.inf
+    #     loss_history = []
+    #     loss_gradient = np.inf
+    #     best_dice = 0
+    #
+    #     for epoch in range(exp_config.max_epochs):
+    #
+    #         logging.info('EPOCH %d' % epoch)
+    #
+    #
+    #         for batch in iterate_minibatches(images_train,
+    #                                          labels_train,
+    #                                          batch_size=exp_config.batch_size,
+    #                                          augment_batch=exp_config.augment_batch):
+    #
+    #         # You can run this loop with the BACKGROUND GENERATOR, which will lead to some improvements in the
+    #         # training speed. However, be aware that currently an exception inside this loop may not be caught.
+    #         # The batch generator may just continue running silently without warning eventhough the code has
+    #         # crashed.
+    #         # for batch in BackgroundGenerator(iterate_minibatches(images_train,
+    #         #                                                      labels_train,
+    #         #                                                      batch_size=exp_config.batch_size,
+    #         #                                                      augment_batch=exp_config.augment_batch)):
+    #
+    #
+    #             if exp_config.warmup_training:
+    #                 if step < 50:
+    #                     curr_lr = exp_config.learning_rate / 10.0
+    #                 elif step == 50:
+    #                     curr_lr = exp_config.learning_rate
+    #
+    #             start_time = time.time()
+    #
+    #             # batch = bgn_train.retrieve()
+    #             x, y = batch
+    #
+    #             # TEMPORARY HACK (to avoid incomplete batches
+    #             if y.shape[0] < exp_config.batch_size:
+    #                 step += 1
+    #                 continue
+    #
+    #             feed_dict = {
+    #                 images_pl: x,
+    #                 labels_pl: y,
+    #                 learning_rate_pl: curr_lr,
+    #                 training_pl: True
+    #             }
+    #
+    #
+    #             _, loss_value = sess.run([train_op, loss], feed_dict=feed_dict)
+    #
+    #             duration = time.time() - start_time
+    #
+    #             # Write the summaries and print an overview fairly often.
+    #             if step % 10 == 0:
+    #                 # Print status to stdout.
+    #                 logging.info('Step %d: loss = %.2f (%.3f sec)' % (step, loss_value, duration))
+    #                 # Update the events file.
+    #
+    #                 summary_str = sess.run(summary, feed_dict=feed_dict)
+    #                 summary_writer.add_summary(summary_str, step)
+    #                 summary_writer.flush()
+    #
+    #             if (step + 1) % exp_config.train_eval_frequency == 0:
+    #
+    #                 logging.info('Training Data Eval:')
+    #                 [train_loss, train_dice] = do_eval(sess,
+    #                                                    eval_loss,
+    #                                                    images_pl,
+    #                                                    labels_pl,
+    #                                                    training_pl,
+    #                                                    images_train,
+    #                                                    labels_train,
+    #                                                    exp_config.batch_size)
+    #
+    #                 train_summary_msg = sess.run(train_summary, feed_dict={train_error_: train_loss,
+    #                                                                        train_dice_: train_dice}
+    #                                              )
+    #                 summary_writer.add_summary(train_summary_msg, step)
+    #
+    #                 loss_history.append(train_loss)
+    #                 if len(loss_history) > 5:
+    #                     loss_history.pop(0)
+    #                     loss_gradient = (loss_history[-5] - loss_history[-1]) / 2
+    #
+    #                 logging.info('loss gradient is currently %f' % loss_gradient)
+    #
+    #                 if exp_config.schedule_lr and loss_gradient < exp_config.schedule_gradient_threshold:
+    #                     logging.warning('Reducing learning rate!')
+    #                     curr_lr /= 10.0
+    #                     logging.info('Learning rate changed to: %f' % curr_lr)
+    #
+    #                     # reset loss history to give the optimisation some time to start decreasing again
+    #                     loss_gradient = np.inf
+    #                     loss_history = []
+    #
+    #                 if train_loss <= last_train:  # best_train:
+    #                     no_improvement_counter = 0
+    #                     logging.info('Decrease in training error!')
+    #                 else:
+    #                     no_improvement_counter = no_improvement_counter+1
+    #                     logging.info('No improvment in training error for %d steps' % no_improvement_counter)
+    #
+    #                 last_train = train_loss
+    #
+    #             # Save a checkpoint and evaluate the model periodically.
+    #             if (step + 1) % exp_config.val_eval_frequency == 0:
+    #
+    #                 checkpoint_file = os.path.join(log_dir, 'model.ckpt')
+    #                 saver.save(sess, checkpoint_file, global_step=step)
+    #                 # Evaluate against the training set.
+    #
+    #                 if not train_on_all_data:
+    #
+    #                     # Evaluate against the validation set.
+    #                     logging.info('Validation Data Eval:')
+    #                     [val_loss, val_dice] = do_eval(sess,
+    #                                                    eval_loss,
+    #                                                    images_pl,
+    #                                                    labels_pl,
+    #                                                    training_pl,
+    #                                                    images_val,
+    #                                                    labels_val,
+    #                                                    exp_config.batch_size)
+    #
+    #                     val_summary_msg = sess.run(val_summary, feed_dict={val_error_: val_loss, val_dice_: val_dice}
+    #                     )
+    #                     summary_writer.add_summary(val_summary_msg, step)
+    #
+    #                     if val_dice > best_dice:
+    #                         best_dice = val_dice
+    #                         best_file = os.path.join(log_dir, 'model_best_dice.ckpt')
+    #                         saver_best_dice.save(sess, best_file, global_step=step)
+    #                         logging.info('Found new best dice on validation set! - %f -  Saving model_best_dice.ckpt' % val_dice)
+    #
+    #                     if val_loss < best_val:
+    #                         best_val = val_loss
+    #                         best_file = os.path.join(log_dir, 'model_best_xent.ckpt')
+    #                         saver_best_xent.save(sess, best_file, global_step=step)
+    #                         logging.info('Found new best crossentropy on validation set! - %f -  Saving model_best_xent.ckpt' % val_loss)
+    #
+    #
+    #             step += 1
+    #
+    #     sess.close()
     data.close()
 
 
@@ -511,8 +558,8 @@ def iterate_minibatches(images, labels, batch_size, augment_batch=False):
 def main():
 
     continue_run = True
-    if not tf.gfile.Exists(log_dir):
-        tf.gfile.MakeDirs(log_dir)
+    if not tf.io.gfile.exists(log_dir):
+        tf.io.gfile.makedirs(log_dir)
         continue_run = False
 
     # Copy experiment config file

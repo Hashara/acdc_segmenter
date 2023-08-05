@@ -15,7 +15,7 @@ nlabels = 4
 # Training settings
 batch_size = 10
 learning_rate = 0.01
-optimizer_handle = tf.train.AdamOptimizer
+optimizer_handle = ttf.optimizers.Adam()
 schedule_lr = False
 warmup_training = True
 weight_decay = 0.00000

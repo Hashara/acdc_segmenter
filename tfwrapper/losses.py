@@ -5,6 +5,7 @@
 import tensorflow as tf
 import numpy as np
 
+
 def per_structure_dice(logits, labels, epsilon=1e-10, sum_over_batches=False, use_hard_pred=True):
     '''
     Dice coefficient per subject per label
@@ -25,9 +26,9 @@ def per_structure_dice(logits, labels, epsilon=1e-10, sum_over_batches=False, us
     intersection = tf.multiply(prediction, labels)
 
     if ndims == 5:
-        reduction_axes = [1,2,3]
+        reduction_axes = [1, 2, 3]
     else:
-        reduction_axes = [1,2]
+        reduction_axes = [1, 2]
 
     if sum_over_batches:
         reduction_axes = [0] + reduction_axes
@@ -72,6 +73,7 @@ def dice_loss(logits, labels, epsilon=1e-10, only_foreground=False, sum_over_bat
 
     return loss
 
+
 def pixel_wise_cross_entropy_loss(logits, labels):
     '''
     Simple wrapper for the normal tensorflow cross entropy loss 
@@ -100,11 +102,36 @@ def pixel_wise_cross_entropy_loss_weighted(logits, labels, class_weights):
     weight_map = tf.multiply(flat_labels, class_weights)
     weight_map = tf.reduce_sum(weight_map, axis=1)
 
-    #loss_map = tf.nn.softmax_cross_entropy_with_logits(logits=flat_logits, labels=flat_labels)
-    loss_map = tf.nn.softmax_cross_entropy_with_logits_v2(logits=flat_logits, labels=flat_labels)
+    # loss_map = tf.nn.softmax_cross_entropy_with_logits(logits=flat_logits, labels=flat_labels)
+    loss_map = tf.nn.softmax_cross_entropy_with_logits(logits=flat_logits, labels=flat_labels)
     weighted_loss = tf.multiply(loss_map, weight_map)
 
     loss = tf.reduce_mean(weighted_loss)
 
     return loss
 
+
+########
+def iou(y_true, y_pred):
+    def f(y_true, y_pred):
+        intersection = (y_true * y_pred).sum()
+        union = y_true.sum() + y_pred.sum() - intersection
+        x = (intersection + 1e-15) / (union + 1e-15)
+        x = x.astype(np.float32)
+        return x
+
+    return tf.numpy_function(f, [y_true, y_pred], tf.float32)
+
+
+smooth = 1e-15
+
+
+def dice_coef(y_true, y_pred):
+    y_true = tf.keras.layers.Flatten()(y_true)
+    y_pred = tf.keras.layers.Flatten()(y_pred)
+    intersection = tf.reduce_sum(y_true * y_pred)
+    return (2. * intersection + smooth) / (tf.reduce_sum(y_true) + tf.reduce_sum(y_pred) + smooth)
+
+
+def dice_loss(y_true, y_pred):
+    return 1.0 - dice_coef(y_true, y_pred)

@@ -13,7 +13,8 @@ from skimage import transform
 
 import utils
 import image_utils
-
+import tensorflow as tf
+from experiments import unet2D_bn_modified_wxent as exp_config
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
 # Dictionary to translate a diagnosis into a number
@@ -376,6 +377,12 @@ def load_and_maybe_process_data(input_folder,
         logging.info('Already preprocessed this configuration. Loading now!')
 
     return h5py.File(data_file_path, 'r')
+
+def preprocess_data(image, label):
+    image = tf.image.resize(image, exp_config.image_size)  # Resize your image if needed
+    image = tf.cast(image, tf.float32) / 255.0  # Normalize your images
+    label = tf.cast(label, tf.uint8)  # If your labels are already uint8, you can skip this line
+    return image, label
 
 
 if __name__ == '__main__':

@@ -7,8 +7,11 @@ import numpy as np
 
 from tfwrapper import utils
 
-from tensorflow.contrib.layers import variance_scaling_initializer, xavier_initializer
-
+# import tensorflow_addons as tfa
+import tf_slim
+from tf_slim.layers import variance_scaling_initializer, xavier_initializer
+from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPool2D, Conv2DTranspose, Concatenate, Input
+from tensorflow.keras.models import Model
 
 def max_pool_layer2d(x, kernel_size=(2, 2), strides=(2, 2), padding="SAME"):
     '''
@@ -122,9 +125,18 @@ def batch_normalisation_layer(bottom, name, training):
     :param training: A tf.bool specifying if the layer is executed at training or testing time
     :return: Batch normalised activation
     '''
+    #
+    # h_bn = tf.contrib.layers.batch_norm(inputs=bottom, decay=0.99, epsilon=1e-3, is_training=training,
+    #                                     scope=name, center=True, scale=True)
 
-    h_bn = tf.contrib.layers.batch_norm(inputs=bottom, decay=0.99, epsilon=1e-3, is_training=training,
-                                        scope=name, center=True, scale=True)
+    h_bn = tf.keras.layers.BatchNormalization(
+        momentum=0.99,
+        epsilon=1e-3,
+        center=True,
+        scale=True,
+        # trainable=training,
+        name=name
+    )(bottom)
 
     return h_bn
 
@@ -200,10 +212,10 @@ def conv2D_layer(bottom,
 
     strides_augm = [1, strides[0], strides[1], 1]
 
-    with tf.variable_scope(name):
+    with tf.compat.v1.variable_scope(name):
 
         weights = get_weight_variable(weight_shape, name='W', type=weight_init, regularize=True)
-        op = tf.nn.conv2d(bottom, filter=weights, strides=strides_augm, padding=padding)
+        op = tf.nn.conv2d(bottom, filters=weights, strides=strides_augm, padding=padding)
 
         biases = None
         if add_bias:
@@ -238,7 +250,7 @@ def conv3D_layer(bottom,
 
     strides_augm = [1, strides[0], strides[1], strides[2], 1]
 
-    with tf.variable_scope(name):
+    with tf.compat.v1.variable_scope(name):
 
         weights = get_weight_variable(weight_shape, name='W', type=weight_init, regularize=True)
         op = tf.nn.conv3d(bottom, filter=weights, strides=strides_augm, padding=padding)
@@ -281,12 +293,12 @@ def deconv2D_layer(bottom,
     bias_shape = [num_filters]
     strides_augm = [1, strides[0], strides[1], 1]
 
-    with tf.variable_scope(name):
+    with tf.compat.v1.variable_scope(name):
 
         weights = get_weight_variable(weight_shape, name='W', type=weight_init, regularize=True)
 
         op = tf.nn.conv2d_transpose(bottom,
-                                    filter=weights,
+                                    filters=weights,
                                     output_shape=output_shape,
                                     strides=strides_augm,
                                     padding=padding)
@@ -332,7 +344,7 @@ def deconv3D_layer(bottom,
 
     strides_augm = [1, strides[0], strides[1], strides[2], 1]
 
-    with tf.variable_scope(name):
+    with tf.compat.v1.variable_scope(name):
 
         weights = get_weight_variable(weight_shape, name='W', type=weight_init, regularize=True)
 
@@ -375,7 +387,7 @@ def conv2D_dilated_layer(bottom,
     weight_shape = [kernel_size[0], kernel_size[1], bottom_num_filters, num_filters]
     bias_shape = [num_filters]
 
-    with tf.variable_scope(name):
+    with tf.compat.v1.variable_scope(name):
 
         weights = get_weight_variable(weight_shape, name='W', type=weight_init, regularize=True)
 
@@ -410,7 +422,7 @@ def dense_layer(bottom,
     weight_shape = [bottom_rhs_dim, hidden_units]
     bias_shape = [hidden_units]
 
-    with tf.variable_scope(name):
+    with tf.compat.v1.variable_scope(name):
 
         weights = get_weight_variable(weight_shape, name='W', type=weight_init, regularize=True)
 
@@ -457,7 +469,7 @@ def conv2D_layer_bn(bottom,
 
     act = activation(conv_bn)
 
-    return act
+    return conv_bn
 
 
 def conv3D_layer_bn(bottom,
@@ -641,12 +653,12 @@ def get_weight_variable(shape, name=None, type='xavier_uniform', regularize=True
         weight = tf.Variable(initial)
     else:
         if initialise_from_constant:
-            weight = tf.get_variable(name, initializer=initial)
+            weight = tf.compat.v1.get_variable(name, initializer=initial)
         else:
-            weight = tf.get_variable(name, shape=shape, initializer=initial)
+            weight = tf.compat.v1.get_variable(name, shape=shape, initializer=initial)
 
     if regularize:
-        tf.add_to_collection('weight_variables', weight)
+        tf.compat.v1.add_to_collection('weight_variables', weight)
 
     return weight
 
@@ -702,3 +714,26 @@ def _add_summaries(op, weights, biases):
     if biases:
         tf.summary.histogram(biases.name, biases)
     tf.summary.histogram(op.op.name + '/activations', op)
+
+
+def conv_block(input, num_filters):
+    x = Conv2D(num_filters, 3, padding="same")(input)
+    x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+
+    x = Conv2D(num_filters, 3, padding="same")(x)
+    x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+
+    return x
+
+def encoder_block(input, num_filters):
+    x = conv_block(input, num_filters)
+    p = MaxPool2D((2, 2))(x)
+    return x, p
+
+def decoder_block(input, skip_features, num_filters):
+    x = Conv2DTranspose(num_filters, (2, 2), strides=2, padding="same")(input)
+    x = Concatenate()([x, skip_features])
+    x = conv_block(x, num_filters)
+    return x

@@ -4,6 +4,13 @@
 
 import tensorflow as tf
 from tfwrapper import layers
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPool2D, Conv2DTranspose, Concatenate, Input
+
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, UpSampling2D, concatenate
+from tensorflow.keras.optimizers import Adam
 
 
 def VGG16_FCN_8(images, training, nlabels):
@@ -415,6 +422,67 @@ def unet2D_bn_modified(images, training, nlabels):
     pred = layers.conv2D_layer_bn(conv9_2, 'pred', num_filters=nlabels, kernel_size=(1,1), activation=tf.identity, training=training, padding='VALID')
 
     return pred
+
+
+def unet2D_bn_modified_hash(input_shape):
+
+    # images_padded = tf.pad(images, [[0,0], [92, 92], [92, 92], [0,0]], 'CONSTANT')
+
+    inputs = Input(input_shape)
+
+    s1, p1 = layers.encoder_block(inputs, 64)
+    s2, p2 = layers.encoder_block(p1, 128)
+    s3, p3 = layers.encoder_block(p2, 256)
+    s4, p4 = layers.encoder_block(p3, 512)
+
+    b1 = layers.conv_block(p4, 1024)
+
+    d1 = layers.decoder_block(b1, s4, 512)
+    d2 = layers.decoder_block(d1, s3, 256)
+    d3 = layers.decoder_block(d2, s2, 128)
+    d4 = layers.decoder_block(d3, s1, 64)
+
+    outputs = layers.Conv2D(1, 1, padding="same", activation="sigmoid")(d4)
+
+    model = Model(inputs, outputs, name="U-Net")
+    return model
+
+
+def unet_model(input_shape):
+    inputs = Input(input_shape)
+
+    # Encoder
+    conv1 = Conv2D(64, 10, activation='relu', padding='same')(inputs)
+    conv1 = Conv2D(64, 10, activation='relu', padding='same')(conv1)
+    pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
+
+    conv2 = Conv2D(128, 10, activation='relu', padding='same')(pool1)
+    conv2 = Conv2D(128, 10, activation='relu', padding='same')(conv2)
+    pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
+
+    # Midpoint
+    conv3 = Conv2D(256, 10, activation='relu', padding='same')(pool2)
+    conv3 = Conv2D(256, 10, activation='relu', padding='same')(conv3)
+
+    # Decoder
+    up4 = UpSampling2D(size=(2, 2))(conv3)
+    up4 = Conv2D(128, 2, activation='relu', padding='same')(up4)
+    merge4 = concatenate([conv2, up4], axis=3)
+    conv4 = Conv2D(128, 10, activation='relu', padding='same')(merge4)
+    conv4 = Conv2D(128, 10, activation='relu', padding='same')(conv4)
+
+    up5 = UpSampling2D(size=(2, 2))(conv4)
+    up5 = Conv2D(64, 2, activation='relu', padding='same')(up5)
+    merge5 = concatenate([conv1, up5], axis=3)
+    conv5 = Conv2D(64, 10, activation='relu', padding='same')(merge5)
+    conv5 = Conv2D(64, 10, activation='relu', padding='same')(conv5)
+
+    # Output
+    outputs = Conv2D(1, 1, activation='sigmoid')(conv5)
+
+    model = Model(inputs=inputs, outputs=outputs)
+    return model
+
 
 def unet2D_bn(images, training, nlabels):
 
